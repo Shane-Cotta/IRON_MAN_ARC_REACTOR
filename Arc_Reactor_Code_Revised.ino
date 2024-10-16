@@ -1,7 +1,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
-#include <DNSServer.h>  // Include the DNSServer library
+#include <DNSServer.h>
 #include <time.h>
 #include "Adafruit_NeoPixel.h"
 
@@ -10,12 +10,6 @@
 // Pin and NeoPixel configuration
 #define NEOPIXEL_PIN    17          // GPIO pin connected to the NeoPixel ring
 #define NUMPIXELS       35          // Number of NeoPixels in the ring
-
-// LED Colors
-#define COLOR_BLUE      0, 20, 255   // RGB for blue background
-#define COLOR_WHITE     250, 250, 250 // RGB for white (chase and flash)
-#define COLOR_RED       255, 0, 0    // RGB for red (Wi-Fi lost)
-#define COLOR_GREEN     0, 255, 0    // RGB for green (AP mode)
 
 // Preferences Namespace
 #define PREF_NAMESPACE  "settings"
@@ -51,15 +45,42 @@ int chaseInterval = 5;          // minutes between chase effects
 int flashInterval = 15;         // minutes between flash effects
 int led_ring_brightness = 40;   // Normal brightness
 int led_ring_brightness_flash = 250;  // Flash brightness
+int numChasers = 1;             // Number of chasers in the chase effect
+int fadeDuration = 2000;        // Fade duration in milliseconds
+
+// Color Variables (Default RGB Values)
+int backgroundColorR = 0;
+int backgroundColorG = 20;
+int backgroundColorB = 255;
+
+int flashColorR = 250;
+int flashColorG = 250;
+int flashColorB = 250;
+
+int wifiLostColorR = 255;
+int wifiLostColorG = 0;
+int wifiLostColorB = 0;
+
+int apModeColorR = 0;
+int apModeColorG = 255;
+int apModeColorB = 0;
 
 // LED Control Variables
 bool chaseActive = false;
 unsigned long previousChaseMillis = 0;
-int chasePixel = 0;
+int chasePositions[10];         // Maximum of 10 chasers
+int numChasersMax = 10;         // Maximum number of chasers allowed
 
 bool flashActive = false;
 unsigned long lastFlashStartMillis = 0;
-const unsigned long flashDuration = 2000; // milliseconds
+
+// Fade Variables
+bool fadeActive = false;
+unsigned long fadeStartMillis = 0;
+
+// Variables to prevent multiple triggers within the same minute
+int lastFlashMinute = -1;
+int lastChaseMinute = -1;
 
 // Wi-Fi Monitoring Variables
 bool wifiConnected = false;
@@ -72,7 +93,7 @@ unsigned long previousWifiLostMillis = 0;
 const unsigned long wifiLostBlinkInterval = 1000; // milliseconds
 bool redOn = false;
 
-// AP Mode Blinking Green LEDs Variables
+// AP Mode Blinking LEDs Variables
 unsigned long previousBlinkMillis = 0;
 const unsigned long blinkInterval = 500; // milliseconds
 bool greenOn = false;
@@ -91,13 +112,14 @@ void initializeTime();
 void blue_light();
 void flash_cuckoo();
 void blink_green();
+void fade_to_blue();
 
 // -------------------------- Setup Function --------------------------
 
 void setup() {
   // Initialize Serial for debugging
   Serial.begin(115200);
-  Serial.println("\nStarting ESP32 Configuration...");
+  Serial.println("\nStarting Arc Reactor Configuration...");
 
   // Initialize NeoPixel
   pixels.begin();
@@ -121,6 +143,29 @@ void setup() {
   flashInterval = preferences.getInt("flashInterval", 15);
   led_ring_brightness = preferences.getInt("brightness", 40);
   led_ring_brightness_flash = preferences.getInt("flashBrightness", 250);
+  numChasers = preferences.getInt("numChasers", 1);
+  fadeDuration = preferences.getInt("fadeDuration", 2000);
+
+  // Color settings
+  backgroundColorR = preferences.getInt("bgColorR", 0);
+  backgroundColorG = preferences.getInt("bgColorG", 20);
+  backgroundColorB = preferences.getInt("bgColorB", 255);
+
+  flashColorR = preferences.getInt("flashColorR", 250);
+  flashColorG = preferences.getInt("flashColorG", 250);
+  flashColorB = preferences.getInt("flashColorB", 250);
+
+  wifiLostColorR = preferences.getInt("wifiLostColorR", 255);
+  wifiLostColorG = preferences.getInt("wifiLostColorG", 0);
+  wifiLostColorB = preferences.getInt("wifiLostColorB", 0);
+
+  apModeColorR = preferences.getInt("apModeColorR", 0);
+  apModeColorG = preferences.getInt("apModeColorG", 255);
+  apModeColorB = preferences.getInt("apModeColorB", 0);
+
+  // Ensure numChasers is within allowed range
+  if (numChasers < 1) numChasers = 1;
+  if (numChasers > numChasersMax) numChasers = numChasersMax;
 
   // Apply brightness settings
   pixels.setBrightness(led_ring_brightness);
@@ -164,7 +209,7 @@ void loop() {
         Serial.println("Wi-Fi Reconnected");
         wifiLostActive = false;
         redOn = false;
-        blue_light(); // Restore blue background
+        blue_light(); // Restore background color
         initializeTime();
       }
     } else {
@@ -196,7 +241,7 @@ void loop() {
       } else {
         pixels.setBrightness(led_ring_brightness_flash);
         for (int i = 0; i < NUMPIXELS; i++) {
-          pixels.setPixelColor(i, pixels.Color(COLOR_RED));
+          pixels.setPixelColor(i, pixels.Color(wifiLostColorR, wifiLostColorG, wifiLostColorB));
         }
         pixels.show();
         redOn = true;
@@ -216,46 +261,75 @@ void loop() {
   int currentSecond = localTime->tm_sec;
 
   // Start the chase effect at specified intervals
-  if (currentMinute % chaseInterval == 0 && !chaseActive && currentSecond == 0) {
-    chaseActive = true;
-    chasePixel = 0;
-    previousChaseMillis = currentMillis;
+  if (!chaseActive) {
+    if ((chaseInterval == 0) ||
+        (currentMinute % chaseInterval == 0 && currentSecond == 0 && currentMinute != lastChaseMinute)) {
+      chaseActive = true;
+      // Initialize chaser positions
+      for (int i = 0; i < numChasers; i++) {
+        chasePositions[i] = (i * NUMPIXELS) / numChasers;
+      }
+      previousChaseMillis = currentMillis;
+      lastChaseMinute = currentMinute;
+    }
   }
 
   // Update the chase effect
   if (chaseActive && (currentMillis - previousChaseMillis >= chaseSpeed)) {
     previousChaseMillis += chaseSpeed;
 
-    // Reset the previous pixel to blue
-    int previousPixel = (chasePixel - 1 + NUMPIXELS) % NUMPIXELS;
-    pixels.setPixelColor(previousPixel, pixels.Color(COLOR_BLUE));
+    // Update each chaser
+    for (int i = 0; i < numChasers; i++) {
+      // Reset the previous pixel to background color
+      int previousPixel = (chasePositions[i] - 1 + NUMPIXELS) % NUMPIXELS;
+      pixels.setPixelColor(previousPixel, pixels.Color(backgroundColorR, backgroundColorG, backgroundColorB));
 
-    // Set the current pixel to white
-    pixels.setPixelColor(chasePixel, pixels.Color(COLOR_WHITE));
+      // Set the current pixel to flash color
+      pixels.setPixelColor(chasePositions[i], pixels.Color(flashColorR, flashColorG, flashColorB));
+
+      // Move to the next pixel
+      chasePositions[i] = (chasePositions[i] + 1) % NUMPIXELS;
+    }
     pixels.show();
 
-    // Move to the next pixel
-    chasePixel++;
-
-    if (chasePixel >= NUMPIXELS) {
-      // Completed one full rotation
-      chaseActive = false;
-      pixels.setPixelColor(chasePixel - 1, pixels.Color(COLOR_BLUE));
-      pixels.show();
+    // Check if all chasers have completed a full rotation
+    static int rotations = 0;
+    if (chasePositions[0] == 0) {
+      rotations++;
+      if (chaseInterval != 0 && rotations >= 1) {
+        chaseActive = false;
+        rotations = 0;
+        // Reset pixels to background color
+        blue_light();
+      }
     }
   }
 
   // Start the flash effect at specified intervals
-  if (currentMinute % flashInterval == 0 && currentSecond == 0 && !flashActive) {
-    flashActive = true;
-    lastFlashStartMillis = currentMillis;
-    flash_cuckoo();
+  if (!flashActive && !fadeActive) {
+    if ((flashInterval == 0) ||
+        (currentMinute % flashInterval == 0 && currentSecond == 0 && currentMinute != lastFlashMinute)) {
+      flashActive = true;
+      lastFlashStartMillis = currentMillis;
+      lastFlashMinute = currentMinute;
+      flash_cuckoo();
+    }
   }
 
-  // Handle the flash effect duration
+  // Handle the flash effect duration and fading
   if (flashActive) {
-    if (currentMillis - lastFlashStartMillis >= flashDuration) {
+    if (currentMillis - lastFlashStartMillis >= flashInterval) {
+      // Flash duration is over, start fade
       flashActive = false;
+      fadeActive = true;
+      fadeStartMillis = currentMillis;
+    }
+  }
+
+  if (fadeActive) {
+    fade_to_blue();
+    if (currentMillis - fadeStartMillis >= fadeDuration) {
+      fadeActive = false;
       if (!chaseActive) {
         blue_light();
       }
@@ -327,20 +401,49 @@ void startAPMode() {
 
 // Serve the configuration HTML page
 void handleRoot() {
-  String html = "<!DOCTYPE html><html><head><title>ESP32 Configuration</title>";
-  html += "<style>body { font-family: Arial, sans-serif; margin: 20px; }";
+  String html = "<!DOCTYPE html><html><head><title>Arc Reactor Configuration</title>";
+  html += "<style>";
+  html += "body { font-family: Arial, sans-serif; margin: 20px; }";
   html += "input[type='text'], input[type='password'], input[type='number'] { width: 100%; padding: 8px; margin: 4px 0; }";
-  html += "input[type='submit'] { padding: 10px 20px; }</style></head><body>";
-  html += "<h1>ESP32 Configuration</h1>";
+  html += "input[type='submit'], input[type='button'], select { padding: 10px 20px; }";
+  html += ".color-input { width: 60px; display: inline-block; }";
+  html += "</style></head><body>";
+  html += "<h1>Arc Reactor Configuration</h1>";
   html += "<form action=\"/save\" method=\"POST\">";
+  html += "<h2>Wi-Fi Settings</h2>";
   html += "Wi-Fi SSID:<br><input type=\"text\" name=\"ssid\" value=\"" + ssid + "\"><br>";
   html += "Wi-Fi Password:<br><input type=\"password\" name=\"password\" value=\"" + password + "\"><br>";
+  html += "<h2>Effect Settings</h2>";
   html += "Chase Speed (ms per step):<br><input type=\"number\" name=\"chaseSpeed\" value=\"" + String(chaseSpeed) + "\"><br>";
-  html += "Chase Interval (minutes):<br><input type=\"number\" name=\"chaseInterval\" value=\"" + String(chaseInterval) + "\"><br>";
-  html += "Flash Interval (minutes):<br><input type=\"number\" name=\"flashInterval\" value=\"" + String(flashInterval) + "\"><br>";
+  html += "Chase Interval (minutes, 0=continuous):<br><input type=\"number\" name=\"chaseInterval\" value=\"" + String(chaseInterval) + "\"><br>";
+  html += "Number of Chasers (1-" + String(numChasersMax) + "):<br><input type=\"number\" name=\"numChasers\" value=\"" + String(numChasers) + "\" min=\"1\" max=\"" + String(numChasersMax) + "\"><br>";
+  html += "Flash Interval (minutes, 0=continuous):<br><input type=\"number\" name=\"flashInterval\" value=\"" + String(flashInterval) + "\"><br>";
+  html += "Fade Duration (ms):<br><input type=\"number\" name=\"fadeDuration\" value=\"" + String(fadeDuration) + "\"><br>";
+  html += "<h2>Brightness Settings</h2>";
   html += "LED Brightness (0-255):<br><input type=\"number\" name=\"brightness\" value=\"" + String(led_ring_brightness) + "\" min=\"0\" max=\"255\"><br>";
   html += "Flash Brightness (0-255):<br><input type=\"number\" name=\"flashBrightness\" value=\"" + String(led_ring_brightness_flash) + "\" min=\"0\" max=\"255\"><br>";
-  html += "<input type=\"submit\" value=\"Save\">";
+  html += "<h2>Color Settings</h2>";
+  // Background Color
+  html += "<strong>Background Color (RGB):</strong><br>";
+  html += "R: <input type=\"number\" name=\"bgColorR\" value=\"" + String(backgroundColorR) + "\" min=\"0\" max=\"255\" class=\"color-input\">";
+  html += " G: <input type=\"number\" name=\"bgColorG\" value=\"" + String(backgroundColorG) + "\" min=\"0\" max=\"255\" class=\"color-input\">";
+  html += " B: <input type=\"number\" name=\"bgColorB\" value=\"" + String(backgroundColorB) + "\" min=\"0\" max=\"255\" class=\"color-input\"><br>";
+  // Flash Color
+  html += "<strong>Flash Color (RGB):</strong><br>";
+  html += "R: <input type=\"number\" name=\"flashColorR\" value=\"" + String(flashColorR) + "\" min=\"0\" max=\"255\" class=\"color-input\">";
+  html += " G: <input type=\"number\" name=\"flashColorG\" value=\"" + String(flashColorG) + "\" min=\"0\" max=\"255\" class=\"color-input\">";
+  html += " B: <input type=\"number\" name=\"flashColorB\" value=\"" + String(flashColorB) + "\" min=\"0\" max=\"255\" class=\"color-input\"><br>";
+  // Wi-Fi Lost Color
+  html += "<strong>Wi-Fi Lost Color (RGB):</strong><br>";
+  html += "R: <input type=\"number\" name=\"wifiLostColorR\" value=\"" + String(wifiLostColorR) + "\" min=\"0\" max=\"255\" class=\"color-input\">";
+  html += " G: <input type=\"number\" name=\"wifiLostColorG\" value=\"" + String(wifiLostColorG) + "\" min=\"0\" max=\"255\" class=\"color-input\">";
+  html += " B: <input type=\"number\" name=\"wifiLostColorB\" value=\"" + String(wifiLostColorB) + "\" min=\"0\" max=\"255\" class=\"color-input\"><br>";
+  // AP Mode Color
+  html += "<strong>AP Mode Color (RGB):</strong><br>";
+  html += "R: <input type=\"number\" name=\"apModeColorR\" value=\"" + String(apModeColorR) + "\" min=\"0\" max=\"255\" class=\"color-input\">";
+  html += " G: <input type=\"number\" name=\"apModeColorG\" value=\"" + String(apModeColorG) + "\" min=\"0\" max=\"255\" class=\"color-input\">";
+  html += " B: <input type=\"number\" name=\"apModeColorB\" value=\"" + String(apModeColorB) + "\" min=\"0\" max=\"255\" class=\"color-input\"><br>";
+  html += "<br><input type=\"submit\" value=\"Save\">";
   html += "</form></body></html>";
 
   server.send(200, "text/html", html);
@@ -351,7 +454,12 @@ void handleSave() {
   if (server.hasArg("ssid") && server.hasArg("password") &&
       server.hasArg("chaseSpeed") && server.hasArg("chaseInterval") &&
       server.hasArg("flashInterval") && server.hasArg("brightness") &&
-      server.hasArg("flashBrightness")) {
+      server.hasArg("flashBrightness") && server.hasArg("numChasers") &&
+      server.hasArg("fadeDuration") &&
+      server.hasArg("bgColorR") && server.hasArg("bgColorG") && server.hasArg("bgColorB") &&
+      server.hasArg("flashColorR") && server.hasArg("flashColorG") && server.hasArg("flashColorB") &&
+      server.hasArg("wifiLostColorR") && server.hasArg("wifiLostColorG") && server.hasArg("wifiLostColorB") &&
+      server.hasArg("apModeColorR") && server.hasArg("apModeColorG") && server.hasArg("apModeColorB")) {
 
     // Retrieve form data
     ssid = server.arg("ssid");
@@ -361,6 +469,29 @@ void handleSave() {
     flashInterval = server.arg("flashInterval").toInt();
     led_ring_brightness = server.arg("brightness").toInt();
     led_ring_brightness_flash = server.arg("flashBrightness").toInt();
+    numChasers = server.arg("numChasers").toInt();
+    fadeDuration = server.arg("fadeDuration").toInt();
+
+    // Color settings
+    backgroundColorR = server.arg("bgColorR").toInt();
+    backgroundColorG = server.arg("bgColorG").toInt();
+    backgroundColorB = server.arg("bgColorB").toInt();
+
+    flashColorR = server.arg("flashColorR").toInt();
+    flashColorG = server.arg("flashColorG").toInt();
+    flashColorB = server.arg("flashColorB").toInt();
+
+    wifiLostColorR = server.arg("wifiLostColorR").toInt();
+    wifiLostColorG = server.arg("wifiLostColorG").toInt();
+    wifiLostColorB = server.arg("wifiLostColorB").toInt();
+
+    apModeColorR = server.arg("apModeColorR").toInt();
+    apModeColorG = server.arg("apModeColorG").toInt();
+    apModeColorB = server.arg("apModeColorB").toInt();
+
+    // Ensure numChasers is within allowed range
+    if (numChasers < 1) numChasers = 1;
+    if (numChasers > numChasersMax) numChasers = numChasersMax;
 
     // Save to Preferences
     preferences.putString("ssid", ssid);
@@ -370,15 +501,32 @@ void handleSave() {
     preferences.putInt("flashInterval", flashInterval);
     preferences.putInt("brightness", led_ring_brightness);
     preferences.putInt("flashBrightness", led_ring_brightness_flash);
+    preferences.putInt("numChasers", numChasers);
+    preferences.putInt("fadeDuration", fadeDuration);
 
-    // Respond to the client
-    String html = "<!DOCTYPE html><html><head><title>Settings Saved</title></head><body>";
-    html += "<h1>Settings Saved Successfully!</h1>";
-    html += "<p>The device will now restart to apply new settings.</p>";
-    html += "</body></html>";
+    // Save color settings
+    preferences.putInt("bgColorR", backgroundColorR);
+    preferences.putInt("bgColorG", backgroundColorG);
+    preferences.putInt("bgColorB", backgroundColorB);
 
-    server.send(200, "text/html", html);
-    delay(1000);
+    preferences.putInt("flashColorR", flashColorR);
+    preferences.putInt("flashColorG", flashColorG);
+    preferences.putInt("flashColorB", flashColorB);
+
+    preferences.putInt("wifiLostColorR", wifiLostColorR);
+    preferences.putInt("wifiLostColorG", wifiLostColorG);
+    preferences.putInt("wifiLostColorB", wifiLostColorB);
+
+    preferences.putInt("apModeColorR", apModeColorR);
+    preferences.putInt("apModeColorG", apModeColorG);
+    preferences.putInt("apModeColorB", apModeColorB);
+
+    // Redirect back to the root page after saving
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+
+    // Delay to ensure response is sent before restarting
+    delay(100);
     ESP.restart(); // Restart to apply new settings
   } else {
     server.send(400, "text/html", "<h1>Bad Request</h1><p>Missing form fields.</p>");
@@ -397,25 +545,25 @@ void initializeTime() {
 
 // -------------------------- LED Control Functions --------------------------
 
-// Set all LEDs to blue background
+// Set all LEDs to background color
 void blue_light() {
   pixels.setBrightness(led_ring_brightness);
   for (int i = 0; i < NUMPIXELS; i++) {
-    pixels.setPixelColor(i, pixels.Color(COLOR_BLUE));
+    pixels.setPixelColor(i, pixels.Color(backgroundColorR, backgroundColorG, backgroundColorB));
   }
   pixels.show();
 }
 
-// Flash all LEDs in white
+// Flash all LEDs in flash color
 void flash_cuckoo() {
   pixels.setBrightness(led_ring_brightness_flash);
   for (int i = 0; i < NUMPIXELS; i++) {
-    pixels.setPixelColor(i, pixels.Color(COLOR_WHITE));
+    pixels.setPixelColor(i, pixels.Color(flashColorR, flashColorG, flashColorB));
   }
   pixels.show();
 }
 
-// Blink green LEDs in AP mode
+// Blink LEDs in AP mode color
 void blink_green() {
   unsigned long currentMillis = millis();
   if (currentMillis - previousBlinkMillis >= blinkInterval) {
@@ -427,10 +575,35 @@ void blink_green() {
     } else {
       pixels.setBrightness(led_ring_brightness_flash);
       for (int i = 0; i < NUMPIXELS; i++) {
-        pixels.setPixelColor(i, pixels.Color(COLOR_GREEN));
+        pixels.setPixelColor(i, pixels.Color(apModeColorR, apModeColorG, apModeColorB));
       }
       pixels.show();
       greenOn = true;
     }
   }
+}
+
+// Fade from flash color to background color
+void fade_to_blue() {
+  unsigned long currentMillis = millis();
+  float progress = (float)(currentMillis - fadeStartMillis) / fadeDuration;
+  if (progress > 1.0) progress = 1.0;
+
+  uint8_t r_start = flashColorR; // Starting from flash color
+  uint8_t g_start = flashColorG;
+  uint8_t b_start = flashColorB;
+
+  uint8_t r_end = backgroundColorR;   // Ending at background color
+  uint8_t g_end = backgroundColorG;
+  uint8_t b_end = backgroundColorB;
+
+  uint8_t r = r_start + progress * (r_end - r_start);
+  uint8_t g = g_start + progress * (g_end - g_start);
+  uint8_t b = b_start + progress * (b_end - b_start);
+
+  pixels.setBrightness(led_ring_brightness);
+  for (int i = 0; i < NUMPIXELS; i++) {
+    pixels.setPixelColor(i, pixels.Color(r, g, b));
+  }
+  pixels.show();
 }
